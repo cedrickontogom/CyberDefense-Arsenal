@@ -1,0 +1,166 @@
+# CyberDefense Arsenal - Git Ignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+logs/
+*.log
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# TypeScript
+*.tsbuildinfo
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Secrets
+*.key
+*.pem
+*.crt
+secrets/
+*.env.secrets
+
+# IDE/Editor
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# Vagrant
+.vagrant/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Helm
+charts/
+*.tgz
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+vendor/
+*.test
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# poetry
+poetry.lock
+
+# uv
+uv.lock
+
+# Ruff
+.ruff_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# PyTest
+.pytest_cache/
+
+# Coverage
+.coverage
+coverage.xml
+
+# Bandit
+.bandit
+
+# Pre-commit
+.pre-commit-config.yaml

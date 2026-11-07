@@ -1,0 +1,246 @@
+version: '3.8'
+
+services:
+  # ==================== CORE INFRASTRUCTURE ====================
+  postgres:
+    image: postgres:16-alpine
+    container_name: cyberdefense-postgres
+    environment:
+      POSTGRES_DB: cyberdefense
+      POSTGRES_USER: cyberdefense
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/docker/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyberdefense -d cyberdefense"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cyberdefense-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+  # ==================== BACKEND API ====================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-backend
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+      - ALLOWED_HOSTS=*
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:7332
+      - NETWORK_SCANNER_URL=http://network-scanner:7331
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./backend:/app
+      - backend_media:/app/media
+      - backend_static:/app/static
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  # Celery worker for async tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-celery
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./backend:/app
+      - backend_media:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: celery -A config worker -l info -Q default,detection,enrichment,ai
+
+  # Celery beat for scheduled tasks
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-celery-beat
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  # ==================== NETWORK SCANNER (Go) ====================
+  network-scanner:
+    build:
+      context: ./network-scanner
+      dockerfile: Dockerfile
+    container_name: cyberdefense-network-scanner
+    environment:
+      - SCANNER_PORT=7331
+      - SCANNER_WEBUI_PORT=7332
+      - REDIS_URL=redis://redis:6379/1
+      - LOG_LEVEL=info
+    ports:
+      - "7331:7331"
+      - "7332:7332"
+    volumes:
+      - network_scanner_data:/data
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    # Note: NET_RAW/NET_ADMIN needed for ARP/ICMP scanning
+
+  # ==================== FRONTEND ====================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+      - VITE_NETWORK_SCANNER_URL=http://localhost:7331
+      - VITE_WS_URL=ws://localhost:8000/ws
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+      - network-scanner
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0
+
+  # ==================== AI / LLM ====================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cyberdefense-ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    # Model will be pulled on first use via API
+
+  # ==================== MONITORING ====================
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: cyberdefense-prometheus
+    volumes:
+      - ./deploy/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: cyberdefense-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/docker/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/docker/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_media:
+  backend_static:
+  network_scanner_data:
+  ollama_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  cyberdefense-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

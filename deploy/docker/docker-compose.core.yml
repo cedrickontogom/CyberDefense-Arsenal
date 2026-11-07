@@ -1,0 +1,396 @@
+version: '3.8'
+
+services:
+  # ==================== CORE INFRASTRUCTURE ====================
+  postgres:
+    image: postgres:16-alpine
+    container_name: cyberdefense-postgres
+    environment:
+      POSTGRES_DB: cyberdefense
+      POSTGRES_USER: cyberdefense
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/docker/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyberdefense -d cyberdefense"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  redis:
+    image: redis:7-alpine
+    container_name: cyberdefense-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: cyberdefense-redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --smp=2
+      - --memory=1G
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --timeout 3s"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ==================== BACKEND API ====================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-backend
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+      - ALLOWED_HOSTS=*
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:7332
+      - NETWORK_SCANNER_URL=http://network-scanner:7331
+      - OLLAMA_URL=http://ollama:11434
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+      - OPENSEARCH_URL=http://opensearch:9200
+    volumes:
+      - ./backend:/app
+      - backend_media:/app/media
+      - backend_static:/app/static
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-celery
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+      - OLLAMA_URL=http://ollama:11434
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+    volumes:
+      - ./backend:/app
+      - backend_media:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: celery -A config worker -l info -Q default,detection,enrichment,ai,hunting,playbooks -c 4
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-celery-beat
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://cyberdefense:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cyberdefense
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - SECRET_KEY=${SECRET_KEY:-generate-me}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  # ==================== NETWORK SCANNER (Go) ====================
+  network-scanner:
+    build:
+      context: ./network-scanner
+      dockerfile: Dockerfile
+    container_name: cyberdefense-network-scanner
+    environment:
+      - SCANNER_PORT=7331
+      - SCANNER_WEBUI_PORT=7332
+      - REDIS_URL=redis://redis:6379/1
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - LOG_LEVEL=info
+      - BACKEND_URL=http://backend:8000/api
+    ports:
+      - "7331:7331"
+      - "7332:7332"
+    volumes:
+      - network_scanner_data:/data
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ==================== FRONTEND ====================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cyberdefense-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+      - VITE_NETWORK_SCANNER_URL=http://localhost:7331
+      - VITE_WS_URL=ws://localhost:8000/ws
+      - VITE_KAFKA_WS_URL=ws://localhost:9092
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+      - network-scanner
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0
+
+  # ==================== AI / LLM ====================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cyberdefense-ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  # ==================== EVENT LAKE & ANALYTICS ====================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: cyberdefense-clickhouse
+    environment:
+      - CLICKHOUSE_DB=cyberdefense
+      - CLICKHOUSE_USER=cyberdefense
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - ./deploy/docker/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ==================== ENTITY GRAPH ====================
+  neo4j:
+    image: neo4j:5.18-enterprise
+    container_name: cyberdefense-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-changeme}
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_pagecache__size=1G
+      - NEO4JLABS_PLUGINS=["apoc", "graph-data-science"]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+
+  # ==================== FULL-TEXT SEARCH ====================
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: cyberdefense-opensearch
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:-changeme}
+      - DISABLE_SECURITY_PLUGIN=false
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ==================== MONITORING ====================
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: cyberdefense-prometheus
+    volumes:
+      - ./deploy/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: cyberdefense-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/docker/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/docker/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - cyberdefense-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  redpanda_data:
+  backend_media:
+  backend_static:
+  network_scanner_data:
+  ollama_data:
+  clickhouse_data:
+  clickhouse_logs:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
+  opensearch_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  cyberdefense-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

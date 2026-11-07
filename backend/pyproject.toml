@@ -1,0 +1,173 @@
+[project]
+name = "cyberdefense-arsenal"
+version = "1.0.0"
+description = "Unified Cybersecurity Defense Arsenal - Backend API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Django Core
+    "django>=5.0,<5.1",
+    "djangorestframework>=3.15",
+    "django-cors-headers>=4.3",
+    "django-filter>=23.5",
+    "django-environ>=0.11",
+    "django-celery-beat>=2.5",
+    "django-celery-results>=2.5",
+    "django-health-check>=3.17",
+    "django-extensions>=3.2",
+    "django-simple-history>=3.4",
+    "django-guardian>=2.4",
+    "django-oauth-toolkit>=2.3",
+    "djangorestframework-simplejwt>=5.3",
+
+    # Database
+    "psycopg2-binary>=2.9",
+    "redis>=5.0",
+    "kafka-python-ng>=2.2",
+
+    # Async & WebSocket
+    "channels>=4.1",
+    "channels-redis>=4.1",
+    "daphne>=4.1",
+
+    # AI / LLM
+    "ollama>=0.3",
+    "openai>=1.30",
+    "tiktoken>=0.7",
+    "langchain>=0.2",
+    "langchain-community>=0.2",
+    "langchain-openai>=0.1",
+
+    # Detection & Sigma
+    "sigmatool>=0.6",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+
+    # Network & Security
+    "requests>=2.31",
+    "httpx>=0.27",
+    "python-nmap>=0.7",
+    "scapy>=2.5",
+    "netaddr>=0.10",
+    "ipaddress>=1.0",
+
+    # Data Processing
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "clickhouse-connect>=0.6",
+    "neo4j>=5.14",
+    "opensearch-py>=2.4",
+    "elasticsearch>=8.13",
+
+    # Threat Intel
+    "stix2>=3.0",
+    "taxii2-client>=2.2",
+    "misp-galaxy>=1.0",
+
+    # Utilities
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "structlog>=24.1",
+    "python-json-logger>=2.0",
+    "croniter>=2.0",
+    "python-magic>=0.4",
+    "filetype>=1.2",
+
+    # Monitoring
+    "prometheus-client>=0.19",
+    "sentry-sdk>=1.45",
+
+    # Testing
+    "pytest>=8.0",
+    "pytest-django>=4.8",
+    "pytest-cov>=4.1",
+    "pytest-asyncio>=0.23",
+    "factory-boy>=3.3",
+    "faker>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "black>=24.1",
+    "isort>=5.13",
+    "pre-commit>=3.6",
+    "ipython>=8.22",
+    "ipdb>=0.13",
+]
+full = [
+    "celery[redis]>=5.3",
+    "flower>=2.0",
+    "django-silk>=5.1",
+    "drf-spectacular>=0.27",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-django>=4.8",
+    "pytest-cov>=4.1",
+    "pytest-asyncio>=0.23",
+    "factory-boy>=3.3",
+    "faker>=24.1",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "black>=24.1",
+    "isort>=5.13",
+    "pre-commit>=3.6",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "UP", "W", "C4", "PTH", "PD", "PG", "PL", "TRY", "SIM", "TID", "NPY", "RSE", "RUF", "ERA", "EXE", "FA", "FUR", "ISC", "ICN", "PIE", "T20", "TCH", "ARG", "ASYNC", "B", "C", "DTZ", "EM", "ICN", "LOG", "M", "N", "PTH", "PLE", "PLR", "PLW", "PT", "Q", "RET", "S", "SLF", "T10", "TD", "TRY", "TID", "UP", "W"]
+ignore = ["S101", "S311", "S603", "S607", "PLW0603", "T201", "T203", "ERA001", "RUF012"]
+per-file-ignores = {
+    "tests/*": ["S101", "S311", "PLW0603", "T201", "T203"]
+}
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+strict_optional = true
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "e2e: End-to-end tests",
+    "slow: Slow tests",
+    "network: Tests requiring network",
+]
+
+[tool.coverage.run]
+source = ["apps", "config"]
+omit = ["*/migrations/*", "*/tests/*", "config/settings/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
